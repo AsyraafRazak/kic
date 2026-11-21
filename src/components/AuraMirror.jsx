@@ -16,6 +16,13 @@ import {
 } from '../game/gestureInteraction.js';
 import { createGameAudio } from '../game/gameAudio.js';
 import { createAuraFilterInteraction, tickAuraFilterInteraction } from '../game/auraFilterInteraction.js';
+import {
+  buildTimestampFilename,
+  captureCompositePhoto,
+  triggerDownloadUrl,
+} from '../utils/photoCapture.js';
+import AuraChallengeOverlays from './aura-mirror/AuraChallengeOverlays.jsx';
+import AuraControlsPanel from './aura-mirror/AuraControlsPanel.jsx';
 
 const FILTERS = [
   { id: 'aura-crown', name: 'AURA CROWN', swatches: ['#62e7e5', '#548eff'], description: 'Halo follows above your head' },
@@ -98,6 +105,7 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
       reducedMotion,
     );
   }, [cameraState, reducedMotion, captureUrl]);
+
   useEffect(() => {
     if (cameraState !== 'ready' || !debugMode) return undefined;
     return startFaceDebugCanvas(debugCanvasRef.current, videoRef.current, getLatestFace);
@@ -193,9 +201,6 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
         }
       }
 
-      // The normal filter charge/release controller is suspended while selection
-      // or the challenge owns gestures. This prevents one palm from confirming
-      // a filter and charging it at the same time.
       if (requireNeutralAfterSelectionRef.current) {
         const neutral = !hand?.handVisible || !hand.gesture || (Number(hand.confidence) || 0) < GESTURE_CONFIG.gestureConfidence;
         selectionNeutralMsRef.current = neutral ? selectionNeutralMsRef.current + dt : 0;
@@ -243,6 +248,7 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
     window.clearTimeout(showcaseTimerRef.current);
     window.clearTimeout(gestureHintTimerRef.current);
   }, []);
+
   useEffect(() => () => {
     captureRequestRef.current += 1;
     if (captureUrlRef.current) URL.revokeObjectURL(captureUrlRef.current);
@@ -291,7 +297,7 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
     const startedAt = performance.now();
     window.clearTimeout(showcaseTimerRef.current);
     setShowcaseAt(startedAt);
-    showcaseTimerRef.current = window.setTimeout(() => setShowcaseAt((current) => current === startedAt ? 0 : current), 7200);
+    showcaseTimerRef.current = window.setTimeout(() => setShowcaseAt((current) => (current === startedAt ? 0 : current)), 7200);
   }
 
   function releaseCapture() {
@@ -309,7 +315,7 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
     const video = videoRef.current;
     const effectCanvas = canvasRef.current;
     const frame = previewFrameRef.current;
-    if (!video || !effectCanvas || !frame || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) {
+    if (!video || !effectCanvas || !frame) {
       setCaptureError('The camera frame is not ready yet. Wait a moment and try again.');
       return;
     }
@@ -317,27 +323,11 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
     setCaptureBusy(true);
     getAudio();
     try {
-      const rect = frame.getBoundingClientRect();
-      const aspect = rect.width && rect.height ? rect.width / rect.height : 16 / 9;
-      const outputWidth = Math.min(1920, Math.max(640, video.videoWidth));
-      const outputHeight = Math.round(outputWidth / aspect);
-      const photo = document.createElement('canvas');
-      photo.width = outputWidth;
-      photo.height = outputHeight;
-      const context = photo.getContext('2d');
-      if (!context) throw new Error('Canvas capture is unavailable in this browser.');
-
-      let sx = 0, sy = 0, sw = video.videoWidth, sh = video.videoHeight;
-      if (sw / sh > aspect) { sw = sh * aspect; sx = (video.videoWidth - sw) / 2; }
-      else { sh = sw / aspect; sy = (video.videoHeight - sh) / 2; }
-      context.save();
-      context.translate(outputWidth, 0);
-      context.scale(-1, 1);
-      context.drawImage(video, sx, sy, sw, sh, 0, 0, outputWidth, outputHeight);
-      context.restore();
-      context.drawImage(effectCanvas, 0, 0, outputWidth, outputHeight);
-
-      const blob = await new Promise((resolve, reject) => photo.toBlob((result) => result ? resolve(result) : reject(new Error('The browser could not encode this photo. Try again.')), 'image/jpeg', 0.92));
+      const blob = await captureCompositePhoto({
+        video,
+        container: frame,
+        layers: [effectCanvas],
+      });
       if (requestId !== captureRequestRef.current) return;
       releaseCapture();
       const url = URL.createObjectURL(blob);
@@ -368,13 +358,7 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
   }
 
   function downloadPhoto() {
-    if (!captureUrl) return;
-    const link = document.createElement('a');
-    link.href = captureUrl;
-    link.download = `iqra-aura-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+    triggerDownloadUrl(captureUrl, buildTimestampFilename('iqra-aura'));
   }
 
   function resetExperience() {
@@ -467,68 +451,91 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
     : handTracking.handVisible ? `Hand detected${handTracking.gesture ? ` · ${handTracking.gesture.replaceAll('_', ' ')}` : ''}.`
       : handTracking.status === 'loading' ? 'Loading the local one-hand tracker.' : 'Show one hand in the preview to enable gesture controls.';
 
-  return <section className="aura-screen">
-    <div className="aura-heading">
-      <div><span className="eyebrow"><i /> LIVE PREVIEW · INTERACTIVE</span><h1>IQRA' <em>Aura Mirror</em></h1><p>Explore face filters or try the short gesture challenge.</p></div>
-      <div className="aura-header-actions"><button className="outline-button aura-reset" onClick={resetExperience}>Reset Experience</button><button className="outline-button aura-back" onClick={onBack}>← Back to experiences</button></div>
-    </div>
-    <div className="aura-layout">
-      <div className="aura-preview-card">
-        <div className="camera-top"><span><i className={`status-dot ${cameraState === 'ready' ? 'active' : ''}`} /> {captureUrl ? 'FROZEN PHOTO PREVIEW' : cameraState === 'ready' ? 'LOCAL CAMERA PREVIEW' : cameraState === 'loading' ? 'WAITING FOR CAMERA PERMISSION' : 'CAMERA UNAVAILABLE'}</span><div className="aura-preview-tools"><span className={`aura-face-status ${faceTracking.faceVisible && !captureUrl ? 'detected' : faceTracking.status === 'error' ? 'error' : ''}`}><i />{faceStatusLabel}</span><span className="camera-tag">MIRRORED · ON DEVICE</span>{cameraState === 'ready' && <button className={`aura-debug-toggle ${debugMode ? 'enabled' : ''}`} onClick={() => setDebugMode((current) => !current)} aria-pressed={debugMode}>{debugMode ? 'LANDMARK DEBUG ON' : 'LANDMARK DEBUG'}</button>}</div></div>
-        <div className={`aura-preview-frame ${captureUrl ? 'captured' : ''}`} ref={previewFrameRef}>
-          {captureUrl ? <img className="aura-captured-image" src={captureUrl} alt="Captured Aura Mirror photo preview" /> : cameraState === 'ready' && <>
-            <video ref={videoRef} autoPlay muted playsInline className="aura-video" />
-            <canvas ref={canvasRef} className="aura-canvas" aria-label={`${selectedFilter.name} face tracking effect`} />
-            {debugMode && <canvas ref={debugCanvasRef} className="face-debug-canvas" aria-label="Detected face landmarks and estimated face center" />}
-            <div className="camera-overlay"><span className="frame-corner tl" /><span className="frame-corner tr" /><span className="frame-corner bl" /><span className="frame-corner br" /><span className="overlay-label">{selectedFilter.name} · {debugMode ? 'LANDMARK DEBUG' : 'LIVE EFFECT'}</span></div>
-            {challenge.status === 'instructions' && <div className="aura-challenge-overlay" role="dialog" aria-modal="true" aria-labelledby="aura-challenge-instruction-title"><div className="aura-challenge-modal"><span className="eyebrow">OPTIONAL · 30 SECOND CHALLENGE</span><h2 id="aura-challenge-instruction-title">Charge. Aim. <em>Release.</em></h2><p>Choose one of the filters on the right to activate it, then hit all three energy markers before time runs out.</p><ol><li>Hold <b>Open_Palm</b> to charge your aura.</li><li>Move your hand over a glowing target to aim.</li><li>Close your fist to release one pulse.</li></ol><div className="aura-challenge-modal-actions"><button className="primary-button" disabled={!challenge.filterActivated} onClick={beginChallenge}>{challenge.filterActivated ? 'Begin challenge' : 'Choose a filter first'}</button><button className="outline-button" onClick={returnToFilters}>Back to filters</button></div></div></div>}
-            {(challenge.status === 'complete' || challenge.status === 'finished') && <div className="aura-challenge-overlay" role="dialog" aria-modal="true" aria-labelledby="aura-challenge-result-title"><div className="aura-challenge-modal"><span className="eyebrow">CHALLENGE RESULTS · {challenge.activated.length}/3 TARGETS</span><h2 id="aura-challenge-result-title">{challenge.status === 'complete' ? 'Aura activated.' : 'Time is up.'}</h2><p>{challenge.status === 'complete' ? 'All three markers are active. Your filter remains ready for photos or free play.' : `${challenge.activated.length} of 3 energy markers activated. Charge up and try another round.`}</p><div className="aura-challenge-modal-actions"><button className="primary-button" onClick={replayChallenge}>Play again</button><button className="outline-button" onClick={returnToFilters}>Return to filters</button></div></div></div>}
-            {showcaseAt > 0 && <div className="aura-showcase-label">SHOWCASE ANIMATION · NO TRACKING INPUT</div>}
-            {selectionMode && <div className="aura-selection-carousel" role="dialog" aria-label="Gesture filter selection">
-              <div className="aura-selection-top"><b>FILTER SELECTION</b><span>{Math.ceil(selectionRemainingMs / 1000)}s</span><button className="aura-selection-cancel" onClick={cancelSelection}>Cancel · Esc</button></div>
-              <div className="aura-selection-options">{FILTERS.map((item, index) => { const colors = filterColors[item.id] || item.swatches; return <button key={item.id} className={selectionIndex === index ? 'highlighted' : ''} onClick={() => chooseFilter(item.id)} aria-pressed={selectionIndex === index}><i style={{ background: `linear-gradient(135deg,${colors[0]},${colors[1]})` }} /><span>{item.name}</span></button>; })}</div>
-              <small>Thumb_Up / Thumb_Down to highlight · Open_Palm to apply · relax briefly to rearm</small>
-            </div>}
-          </>}
-          {!captureUrl && cameraState === 'loading' && <div className="aura-preview-state"><span className="session-spinner" /><b>Requesting camera access</b><p>Allow the browser permission prompt to begin your mirror preview.</p><span className="aura-state-note">Your camera is not recorded, saved, or uploaded.</span></div>}
-          {!captureUrl && cameraState === 'error' && <div className="aura-preview-state aura-preview-error"><span className="session-error-mark">!</span><b>We couldn’t start the camera</b><p>{cameraError || 'Check your camera connection and browser permission, then try again.'}</p><div className="aura-state-actions"><button className="primary-button" onClick={onRetry}>Try camera again <span className="button-arrow">↻</span></button><button className="outline-button" onClick={onBack}>Back</button></div></div>}
-        </div>
-        <div className="camera-bottom"><span>{captureUrl ? 'This preview stays in memory until you retake or leave' : 'Video stays on this device · no recording or uploads'}</span><span>16:9 · {captureUrl ? 'CAPTURE' : 'PREVIEW'}</span></div>
-        <div className="aura-photo-actions">
-          {!captureUrl ? <><button className="primary-button aura-capture-button" onClick={capturePhoto} disabled={cameraState !== 'ready' || captureBusy}>{captureBusy ? 'Preparing photo…' : 'Capture Photo'} <span>◉</span></button><button className="aura-mute-button" onClick={() => { const next = !muted; setMuted(next); if (audioRef.current) audioRef.current.setMuted(next); }} aria-pressed={muted}>{muted ? 'Sound off' : 'Mute sounds'}</button></> : <><button className="outline-button" onClick={retakePhoto}>Retake</button><button className="primary-button" onClick={downloadPhoto}>Download photo</button></>}
-        </div>
-        {captureError && <p className="aura-capture-error" role="alert">{captureError}</p>}
+  return (
+    <section className="aura-screen">
+      <div className="aura-heading">
+        <div><span className="eyebrow"><i /> LIVE PREVIEW · INTERACTIVE</span><h1>IQRA' <em>Aura Mirror</em></h1><p>Explore face filters or try the short gesture challenge.</p></div>
+        <div className="aura-header-actions"><button className="outline-button aura-reset" onClick={resetExperience}>Reset Experience</button><button className="outline-button aura-back" onClick={onBack}>← Back to experiences</button></div>
       </div>
-      <aside className="aura-controls-card">
-        <div className="aura-control-heading"><span className="eyebrow">YOUR AURA</span><h2>Choose a<br /><em>filter.</em></h2></div>
-        <div className="aura-filter-list" role="group" aria-label="Choose an Aura Mirror filter">
-          {FILTERS.map((item) => <button key={item.id} disabled={!!captureUrl} className={`aura-filter-option ${preset === item.id ? 'selected' : ''}`} onClick={() => chooseFilter(item.id)} aria-pressed={preset === item.id}>
-            <span className="filter-swatch"><i style={{ background: (filterColors[item.id] || item.swatches)[0] }} /><i style={{ background: (filterColors[item.id] || item.swatches)[1] }} /></span><span className="filter-copy"><b>{item.name}</b><small>{item.description}</small></span><span className="filter-check">{preset === item.id ? '✓' : ''}</span>
-          </button>)}
+      <div className="aura-layout">
+        <div className="aura-preview-card">
+          <div className="camera-top">
+            <span><i className={`status-dot ${cameraState === 'ready' ? 'active' : ''}`} /> {captureUrl ? 'FROZEN PHOTO PREVIEW' : cameraState === 'ready' ? 'LOCAL CAMERA PREVIEW' : cameraState === 'loading' ? 'WAITING FOR CAMERA PERMISSION' : 'CAMERA UNAVAILABLE'}</span>
+            <div className="aura-preview-tools">
+              <span className={`aura-face-status ${faceTracking.faceVisible && !captureUrl ? 'detected' : faceTracking.status === 'error' ? 'error' : ''}`}><i />{faceStatusLabel}</span>
+              <span className="camera-tag">MIRRORED · ON DEVICE</span>
+              {cameraState === 'ready' && <button className={`aura-debug-toggle ${debugMode ? 'enabled' : ''}`} onClick={() => setDebugMode((current) => !current)} aria-pressed={debugMode}>{debugMode ? 'LANDMARK DEBUG ON' : 'LANDMARK DEBUG'}</button>}
+            </div>
+          </div>
+          <div className={`aura-preview-frame ${captureUrl ? 'captured' : ''}`} ref={previewFrameRef}>
+            {captureUrl ? <img className="aura-captured-image" src={captureUrl} alt="Captured Aura Mirror photo preview" /> : cameraState === 'ready' && (
+              <>
+                <video ref={videoRef} autoPlay muted playsInline className="aura-video" />
+                <canvas ref={canvasRef} className="aura-canvas" aria-label={`${selectedFilter.name} face tracking effect`} />
+                {debugMode && <canvas ref={debugCanvasRef} className="face-debug-canvas" aria-label="Detected face landmarks and estimated face center" />}
+                <div className="camera-overlay"><span className="frame-corner tl" /><span className="frame-corner tr" /><span className="frame-corner bl" /><span className="frame-corner br" /><span className="overlay-label">{selectedFilter.name} · {debugMode ? 'LANDMARK DEBUG' : 'LIVE EFFECT'}</span></div>
+                <AuraChallengeOverlays
+                  challenge={challenge}
+                  showcaseAt={showcaseAt}
+                  selectionMode={selectionMode}
+                  selectionRemainingMs={selectionRemainingMs}
+                  selectionIndex={selectionIndex}
+                  filters={FILTERS}
+                  filterColors={filterColors}
+                  onBeginChallenge={beginChallenge}
+                  onReturnToFilters={returnToFilters}
+                  onReplayChallenge={replayChallenge}
+                  onCancelSelection={cancelSelection}
+                  onChooseFilter={chooseFilter}
+                />
+              </>
+            )}
+            {!captureUrl && cameraState === 'loading' && <div className="aura-preview-state"><span className="session-spinner" /><b>Requesting camera access</b><p>Allow the browser permission prompt to begin your mirror preview.</p><span className="aura-state-note">Your camera is not recorded, saved, or uploaded.</span></div>}
+            {!captureUrl && cameraState === 'error' && <div className="aura-preview-state aura-preview-error"><span className="session-error-mark">!</span><b>We couldn’t start the camera</b><p>{cameraError || 'Check your camera connection and browser permission, then try again.'}</p><div className="aura-state-actions"><button className="primary-button" onClick={onRetry}>Try camera again <span className="button-arrow">↻</span></button><button className="outline-button" onClick={onBack}>Back</button></div></div>}
+          </div>
+          <div className="camera-bottom"><span>{captureUrl ? 'This preview stays in memory until you retake or leave' : 'Video stays on this device · no recording or uploads'}</span><span>16:9 · {captureUrl ? 'CAPTURE' : 'PREVIEW'}</span></div>
+          <div className="aura-photo-actions">
+            {!captureUrl ? (
+              <>
+                <button className="primary-button aura-capture-button" onClick={capturePhoto} disabled={cameraState !== 'ready' || captureBusy}>{captureBusy ? 'Preparing photo…' : 'Capture Photo'} <span>◉</span></button>
+                <button className="aura-mute-button" onClick={() => { const next = !muted; setMuted(next); if (audioRef.current) audioRef.current.setMuted(next); }} aria-pressed={muted}>{muted ? 'Sound off' : 'Mute sounds'}</button>
+              </>
+            ) : (
+              <>
+                <button className="outline-button" onClick={retakePhoto}>Retake</button>
+                <button className="primary-button" onClick={downloadPhoto}>Download photo</button>
+              </>
+            )}
+          </div>
+          {captureError && <p className="aura-capture-error" role="alert">{captureError}</p>}
         </div>
-        <div className="aura-color-controls" role="group" aria-label={`${selectedFilter.name} colors`}>
-          <label><span>Primary color</span><input type="color" value={selectedColors[0]} disabled={!!captureUrl} onChange={(event) => updateFilterColor(0, event.target.value)} /></label>
-          <label><span>Accent color</span><input type="color" value={selectedColors[1]} disabled={!!captureUrl} onChange={(event) => updateFilterColor(1, event.target.value)} /></label>
-        </div>
-        <label className="aura-intensity" htmlFor="aura-intensity"><span><b>Effect intensity</b><strong>{intensity}%</strong></span><input id="aura-intensity" type="range" min="0" max="100" value={intensity} disabled={!!captureUrl} onChange={(event) => setIntensity(Number(event.target.value))} style={{ '--intensity': `${intensity}%` }} /><small>Adjust overlay brightness and particle density.</small></label>
-        <div className={`aura-tracking-state tracking-${faceTracking.status}`} role="status" aria-live="polite"><span className="tracking-state-mark">{faceTracking.faceVisible ? '✓' : faceTracking.status === 'error' ? '!' : '·'}</span><p><b>{trackingTitle}</b><small>{trackingDescription}</small>{faceTracking.faceVisible && faceTracking.center && faceTracking.size && <small className="face-readout">{faceTracking.facesDetected > 1 ? `${faceTracking.facesDetected} FACES TRACKED · ` : ''}CENTER {faceTracking.center.x.toFixed(2)}, {faceTracking.center.y.toFixed(2)} · SIZE {faceTracking.size.width.toFixed(2)} × {faceTracking.size.height.toFixed(2)}{faceTracking.confidence !== null ? ` · ${faceTracking.confidenceSource === 'landmark-presence' ? 'PRESENCE' : 'VISIBILITY'} ${Math.round(faceTracking.confidence * 100)}%` : ' · SCORE N/A'}</small>}{faceTracking.orientation && <small className="face-readout">HEAD YAW {Math.round(faceTracking.orientation.yaw)}° · PITCH {Math.round(faceTracking.orientation.pitch)}° · ROLL {Math.round(faceTracking.orientation.roll)}°</small>}</p></div>
-        <div className="aura-privacy-notice"><b>YOUR PRIVACY</b><span>Camera frames and tracking run locally on this device. Nothing is recorded or uploaded. Captures stay in this tab until you retake or leave; a file is created only when you choose Download.</span></div>
-        {!captureUrl && <div className={`aura-tracking-state tracking-${handTracking.status}`} role="status" aria-live="polite"><span className="tracking-state-mark">{handTracking.handVisible ? '✓' : handTracking.status === 'error' ? '!' : '·'}</span><p><b>Hand tracking {handTracking.handVisible ? 'active' : handTracking.status}</b><small>{handDescription}</small></p></div>}
-        {!captureUrl && challenge.status !== 'playing' && <div className="aura-effect-hud" role="status" aria-live="polite">
-          <div className="aura-effect-hud-title"><b>{selectedFilter.name}</b><span>{effectStatus.cooldownMs > 0 ? `COOLDOWN ${Math.ceil(effectStatus.cooldownMs / 100) / 10}s` : effectStatus.chargeReady ? 'CHARGE READY' : effectStatus.charge > 0 ? 'CHARGING' : 'READY'}</span></div>
-          <div className="aura-energy-meter" role="progressbar" aria-label="Filter effect charge" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(effectStatus.charge * 100)}><i style={{ width: `${Math.round(effectStatus.charge * 100)}%` }} /></div>
-          <small>{effectStatus.cooldownMs > 0 ? 'Wait briefly, then charge again.' : selectedFilter.id === 'aura-crown' ? 'Hold a closed fist near the halo. Its motes spread and accelerate before an upward laser fires.' : selectedFilter.id === 'energy-hands' ? 'Both hands combine into one energy ball; bring them together to enlarge it, then close both fists for a Kamehameha beam.' : 'Open both hands to raise a shield; close both fists near the visor to fire twin eye lasers.'}</small>
-        </div>}
-        <div className="aura-challenge-card">
-          <div className="aura-challenge-title"><span className="eyebrow">OPTIONAL · 30 SECOND CHALLENGE</span>{challenge.status === 'playing' && <strong>{Math.ceil(challenge.remainingMs / 1000)}s</strong>}</div>
-          <div className="aura-energy-meter" role="progressbar" aria-label="Gesture charge" aria-valuemin="0" aria-valuemax="100" aria-valuenow={challenge.energy}><i style={{ width: `${challenge.energy}%` }} /></div>
-          <p className="aura-game-instruction"><b>{challenge.status === 'playing' ? 'OPEN PALM → POINT → CLOSE FIST' : challenge.status === 'complete' ? 'ALL THREE MARKERS ACTIVATED' : challenge.status === 'finished' ? 'TIME COMPLETE · GIVE IT ANOTHER TRY' : challenge.status === 'instructions' ? challenge.filterActivated ? `${FILTERS.find((item) => item.id === challenge.filterId)?.name || 'FILTER'} READY` : 'CHOOSE A FILTER TO BEGIN' : challenge.status === 'skipped' ? 'FILTER PREVIEW · CHALLENGE SKIPPED' : 'OPEN PALM → POINT → CLOSE FIST'}</b><small>{challenge.status === 'playing' ? challenge.feedback || 'Hold Open_Palm to charge, aim with your hand position, then release with Closed_Fist.' : challenge.status === 'instructions' ? 'Select a filter above, then begin. Hold Open_Palm to charge, aim at a target with your hand, and close your fist to release.' : 'Hold Open_Palm to charge, aim at a marker with your hand, then release with Closed_Fist.'}</small></p>
-          <div className="aura-challenge-progress"><span>{challenge.activated.length}/3 MARKERS</span><span>{challenge.status === 'playing' && !faceTracking.faceVisible ? 'PAUSED · FACE LOST' : challenge.status === 'playing' && !handTracking.handVisible ? 'PAUSED · SHOW HAND' : challenge.feedback || 'READY'}</span></div>
-          <div className="aura-challenge-actions">{challenge.status === 'playing' ? <button className="outline-button" onClick={skipChallenge}>End challenge</button> : <button className="primary-button" onClick={startChallenge} disabled={!!captureUrl}>{challenge.status === 'complete' || challenge.status === 'finished' ? 'Play again' : challenge.status === 'instructions' ? 'Challenge instructions' : 'Start challenge'}</button>}{challenge.status === 'idle' && <button className="outline-button" onClick={skipChallenge} disabled={!!captureUrl}>Just enjoy filters</button>}{challenge.status !== 'playing' && <button className="outline-button" onClick={playShowcase} disabled={showcaseAt > 0 || !!captureUrl}>{showcaseAt > 0 ? 'Showcase playing' : 'Run visual demo'}</button>}</div>
-          {showcaseAt > 0 && <small className="aura-demo-disclaimer">Visual-only animation. It does not use or simulate hand tracking.</small>}
-        </div>
-        {!captureUrl && <div className={`aura-instructions ${selectionMode ? 'selection-instructions' : ''}`}><span>{challenge.status === 'playing' ? 'CHALLENGE GESTURES' : selectionMode ? 'FILTER SELECTION' : 'GESTURE CONTROLS'}</span><p>{challenge.status === 'playing' ? 'Open_Palm charges, Pointing_Up aims and Closed_Fist releases. Filter gestures are paused during the challenge.' : selectionMode ? 'Hold Thumb_Up or Thumb_Down briefly to highlight a filter. Hold Open_Palm to apply, or cancel with Escape.' : 'Hold Open_Palm to charge a filter effect, then close your fist after the charge builds to release one pulse. Near the crown, keep a fist closed to build a faster, wider mote orbit before its laser fires. Hold Thumb_Up or Thumb_Down briefly to change filters; hold Pointing_Up for about 0.8 seconds to open selection. Manual filter buttons remain available.'}</p>{handLost && challenge.status !== 'playing' && <small className="gesture-tracking-pause">Hand tracking lost · gesture actions are paused until reacquired.</small>}{gestureHint && <small className="gesture-action-hint" role="status">{gestureHint}</small>}</div>}
-      </aside>
-    </div>
-  </section>;
+        <AuraControlsPanel
+          filters={FILTERS}
+          preset={preset}
+          filterColors={filterColors}
+          selectedFilter={selectedFilter}
+          selectedColors={selectedColors}
+          intensity={intensity}
+          captureUrl={captureUrl}
+          faceTracking={faceTracking}
+          trackingTitle={trackingTitle}
+          trackingDescription={trackingDescription}
+          handTracking={handTracking}
+          handDescription={handDescription}
+          challenge={challenge}
+          effectStatus={effectStatus}
+          showcaseAt={showcaseAt}
+          selectionMode={selectionMode}
+          handLost={handLost}
+          gestureHint={gestureHint}
+          onChooseFilter={chooseFilter}
+          onUpdateFilterColor={updateFilterColor}
+          onIntensityChange={setIntensity}
+          onSkipChallenge={skipChallenge}
+          onStartChallenge={startChallenge}
+          onPlayShowcase={playShowcase}
+        />
+      </div>
+    </section>
+  );
 }
