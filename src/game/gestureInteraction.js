@@ -53,11 +53,6 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function distance(a, b) {
-  if (!a || !b) return 0;
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
 export function createGestureControllerState() {
   return {
     mode: GESTURE_MODE.AR,
