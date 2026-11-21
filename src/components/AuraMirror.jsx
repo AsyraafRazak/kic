@@ -55,7 +55,6 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
   const [handLost, setHandLost] = useState(false);
   const [effectStatus, setEffectStatus] = useState({ charge: 0, chargeReady: false, cooldownMs: 0 });
   const challengeRef = useRef(challenge);
-  const trackingRef = useRef({ faceTracking, handTracking });
   const showcaseTimerRef = useRef(0);
   const gestureHintTimerRef = useRef(0);
   const gestureControllerRef = useRef(createGestureControllerState());
@@ -71,7 +70,8 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
   const selectedColors = filterColors[preset] || DEFAULT_FILTER_COLORS[preset] || FILTERS[0].swatches;
   faceTrackingRef.current = faceTracking;
   handTrackingRef.current = handTracking;
-  trackingRef.current = { faceTracking, handTracking };
+  const getLatestFace = () => faceTrackingRef.current?.latestRef?.current || faceTrackingRef.current;
+  const getLatestHand = () => handTrackingRef.current?.latestRef?.current || handTrackingRef.current;
   challengeRef.current = challenge;
   presetRef.current = preset;
   onPresetChangeRef.current = onPresetChange;
@@ -92,11 +92,15 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
 
   useEffect(() => {
     if (cameraState !== 'ready' || captureUrl) return undefined;
-    return startAuraCanvas(canvasRef.current, () => inputsRef.current, reducedMotion);
+    return startAuraCanvas(
+      canvasRef.current,
+      () => ({ ...inputsRef.current, faceTracking: getLatestFace(), handTracking: getLatestHand() }),
+      reducedMotion,
+    );
   }, [cameraState, reducedMotion, captureUrl]);
   useEffect(() => {
     if (cameraState !== 'ready' || !debugMode) return undefined;
-    return startFaceDebugCanvas(debugCanvasRef.current, videoRef.current, () => faceTrackingRef.current);
+    return startFaceDebugCanvas(debugCanvasRef.current, videoRef.current, getLatestFace);
   }, [cameraState, debugMode, videoRef]);
 
   useEffect(() => {
@@ -104,7 +108,8 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
     let previous = performance.now();
     const timer = window.setInterval(() => {
       const now = performance.now();
-      const { faceTracking: face, handTracking: hand } = trackingRef.current;
+      const face = getLatestFace();
+      const hand = getLatestHand();
       const next = tickAuraChallenge(challengeRef.current, hand, !!face.faceVisible, now - previous);
       previous = now;
       challengeRef.current = next;
@@ -126,7 +131,7 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
       const now = performance.now();
       const dt = Math.min(200, now - previousAt);
       previousAt = now;
-      const hand = handTrackingRef.current;
+      const hand = getLatestHand();
       const visible = Boolean(hand?.handVisible && hand.position);
       const wasVisible = Boolean(previousHandRef.current?.handVisible && previousHandRef.current?.position);
       if (wasVisible && !visible) setHandLost(true);
@@ -199,7 +204,7 @@ export default function AuraMirror({ cameraState, cameraError, videoRef, faceTra
       if (challengeActive || controller.mode !== GESTURE_MODE.AR || consumedSelectionGesture || requireNeutralAfterSelectionRef.current) {
         filterInteractionRef.current = createAuraFilterInteraction();
       } else {
-        filterInteractionRef.current = tickAuraFilterInteraction(filterInteractionRef.current, hand, dt, !!trackingRef.current.faceTracking.faceVisible);
+        filterInteractionRef.current = tickAuraFilterInteraction(filterInteractionRef.current, hand, dt, !!getLatestFace()?.faceVisible);
       }
       const effect = filterInteractionRef.current;
       inputsRef.current.filterInteraction = effect;

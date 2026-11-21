@@ -173,6 +173,9 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
   const previewVideoRef = useRef(null);
   const gestureVideoRef = useRef(null);
   const liveDrawCanvasRef = useRef(null);
+  const artboardCursorRef = useRef(null);
+  const liveCursorRef = useRef(null);
+  const landmarkDotsRef = useRef([]);
   const livePointerIdRef = useRef(null);
   const drawingRef = useRef(null);
   const historyRef = useRef({ past: [], future: [] });
@@ -190,6 +193,8 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
   inputsRef.current = { preset: 'custom-filter', intensity: 100, faceTracking, customArtwork: artCanvasRef.current, customFaceArtwork: faceArtworkCanvasRef.current, customPlacement: placement, handTracking };
   handTrackingRef.current = handTracking;
   faceTrackingRef.current = faceTracking;
+  const getLatestFace = () => faceTrackingRef.current?.latestRef?.current || faceTrackingRef.current;
+  const getLatestHand = () => handTrackingRef.current?.latestRef?.current || handTrackingRef.current;
   liveToolRef.current = tool;
   colorRef.current = color;
   brushSizeRef.current = brushSize;
@@ -198,12 +203,6 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
   const hasArtwork = historyRef.current.past.reduce((exists, action) => action.tool === 'clear' ? false : true, false);
   const canUndo = historyRef.current.past.length > 0;
   const canRedo = historyRef.current.future.length > 0;
-  const firstGestureHand = handTracking?.hands?.[0];
-  const pointingHand = handTracking?.hands?.find(isPointingPose);
-  const cursorHand = pointingHand || firstGestureHand;
-  const handTip = cursorHand?.indexTip || cursorHand?.landmarks?.[8] || null;
-  const liveCursorPoint = handTip ? videoPointToStage(handTip) : null;
-  const artboardCursorPoint = handTip ? videoPointToElement(handTip, artCanvasRef.current) : null;
 
   function redrawEditor(draft = null) {
     const canvas = artCanvasRef.current;
@@ -301,6 +300,7 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
           return;
         }
         const url = URL.createObjectURL(blob);
+        // eslint-disable-next-line no-control-regex
         const safeName = filterName.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').replace(/\s+/g, '-').slice(0, 60) || 'my-aura-filter';
         const link = document.createElement('a');
         link.href = url;
@@ -349,7 +349,7 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
   function stagePointToFace(point) {
     const rect = stageRef.current?.getBoundingClientRect();
     const video = videoRef.current;
-    const face = faceTrackingRef.current;
+    const face = getLatestFace();
     if (!rect?.width || !rect?.height || !video?.videoWidth || !video?.videoHeight || !face?.faceVisible || !face.center || !face.size?.width || !face.size?.height) return null;
     const scale = Math.max(rect.width / video.videoWidth, rect.height / video.videoHeight);
     const renderedWidth = video.videoWidth * scale;
@@ -361,15 +361,6 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
     return {
       x: clamp((videoPoint.x - face.center.x) / face.size.width + .5, 0, 1),
       y: clamp((videoPoint.y - face.center.y) / face.size.height + .5, 0, 1),
-    };
-  }
-
-  function videoPointToFace(point) {
-    const face = faceTrackingRef.current;
-    if (!face?.faceVisible || !face.center || !face.size?.width || !face.size?.height) return null;
-    return {
-      x: clamp((point.x - face.center.x) / face.size.width + .5, 0, 1),
-      y: clamp((point.y - face.center.y) / face.size.height + .5, 0, 1),
     };
   }
 
@@ -593,7 +584,7 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
       const now = performance.now();
       const dt = Math.min(100, now - previousAt);
       previousAt = now;
-      const hand = handTrackingRef.current;
+      const hand = getLatestHand();
       const gestureState = liveGestureRef.current;
       const hands = hand?.hands || [];
       const drawingHandIndex = hands.findIndex(isPointingPose);
@@ -609,14 +600,14 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
         if (gestureState.pointingMs >= 120 && view === 'edit') {
           const point = rawPoint ? videoPointToElement(rawPoint, artCanvasRef.current) : null;
           if (drawingRef.current?.source === 'pointer') gestureState.drawing = false;
-          else {
+          else if (point) {
             if (!gestureState.drawing) beginArtGesture(point);
             else extendArtGesture(point);
             gestureState.drawing = drawingRef.current?.source === 'gesture';
           }
-        } else if (gestureState.pointingMs >= 120 && liveDrawingRef.current.activeSource !== 'pointer') {
-          if (!gestureState.drawing) beginLiveStroke(point, liveDrawingModeRef.current, 'gesture');
-          else extendLiveStroke(point, 'gesture');
+        } else if (gestureState.pointingMs >= 120 && liveDrawingRef.current.activeSource !== 'pointer' && rawPoint) {
+          if (!gestureState.drawing) beginLiveStroke(rawPoint, liveDrawingModeRef.current, 'gesture');
+          else extendLiveStroke(rawPoint, 'gesture');
           gestureState.drawing = liveDrawingRef.current.activeSource === 'gesture';
         }
       } else if (gesture === 'Thumb_Up' || gesture === 'Thumb_Down') {
@@ -676,8 +667,83 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
 
   useEffect(() => {
     if (view !== 'preview' || cameraState !== 'ready') return undefined;
-    return startAuraCanvas(previewCanvasRef.current, () => inputsRef.current, reducedMotion);
+    return startAuraCanvas(
+      previewCanvasRef.current,
+      () => ({ ...inputsRef.current, faceTracking: getLatestFace(), handTracking: getLatestHand() }),
+      reducedMotion,
+    );
   }, [view, cameraState, reducedMotion]);
+
+  useEffect(() => {
+    const hideOverlays = () => {
+      if (artboardCursorRef.current) artboardCursorRef.current.style.display = 'none';
+      if (liveCursorRef.current) liveCursorRef.current.style.display = 'none';
+      landmarkDotsRef.current.forEach((dot) => {
+        if (dot) dot.style.display = 'none';
+      });
+    };
+
+    if (cameraState !== 'ready' || capturedPhoto) {
+      hideOverlays();
+      return undefined;
+    }
+
+    let frameId = 0;
+    const syncOverlays = () => {
+      frameId = requestAnimationFrame(syncOverlays);
+      const latestHand = getLatestHand();
+      const hands = latestHand?.hands || [];
+      const pointing = hands.find(isPointingPose);
+      const cursorHand = pointing || hands[0];
+      const tip = cursorHand?.indexTip || cursorHand?.landmarks?.[8] || null;
+      const isPointing = Boolean(pointing);
+
+      if (artboardCursorRef.current) {
+        if (view === 'edit' && tip) {
+          const pos = videoPointToElement(tip, artCanvasRef.current);
+          artboardCursorRef.current.style.display = 'block';
+          artboardCursorRef.current.style.left = `${pos.x * 100}%`;
+          artboardCursorRef.current.style.top = `${pos.y * 100}%`;
+          artboardCursorRef.current.classList.toggle('drawing', isPointing);
+        } else {
+          artboardCursorRef.current.style.display = 'none';
+        }
+      }
+
+      if (liveCursorRef.current) {
+        if (view === 'preview' && tip) {
+          const pos = videoPointToStage(tip);
+          liveCursorRef.current.style.display = 'block';
+          liveCursorRef.current.style.left = `${pos.x * 100}%`;
+          liveCursorRef.current.style.top = `${pos.y * 100}%`;
+          liveCursorRef.current.classList.toggle('drawing', isPointing);
+        } else {
+          liveCursorRef.current.style.display = 'none';
+        }
+      }
+
+      const firstLandmarks = view === 'edit' ? hands[0]?.landmarks : null;
+      for (let index = 0; index < 21; index += 1) {
+        const dot = landmarkDotsRef.current[index];
+        if (!dot) continue;
+        const landmark = firstLandmarks?.[index];
+        if (!landmark) {
+          dot.style.display = 'none';
+        } else {
+          const point = cameraPoint(landmark);
+          dot.style.display = 'block';
+          dot.style.left = `${point.x * 100}%`;
+          dot.style.top = `${point.y * 100}%`;
+        }
+      }
+    };
+
+    frameId = requestAnimationFrame(syncOverlays);
+    return () => {
+      cancelAnimationFrame(frameId);
+      hideOverlays();
+    };
+  }, [cameraState, view, capturedPhoto]);
 
   return <section className={`filter-creator-screen ${view === 'edit' ? 'editing-design' : 'previewing-design'}`}>
     <video ref={videoRef} autoPlay muted playsInline className="filter-tracking-video" aria-hidden="true" />
@@ -699,7 +765,7 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
         <div className="filter-artboard-wrap">
           <div className="filter-artboard-guide"><span className="filter-face-guide" /><span className="filter-artboard-center" /></div>
           <canvas ref={artCanvasRef} className="filter-artboard" width={ART_WIDTH} height={ART_HEIGHT} aria-label="Transparent filter drawing canvas" onPointerDown={startDraw} onPointerMove={moveDraw} onPointerUp={finishDraw} onPointerCancel={finishDraw} />
-          {handTip && artboardCursorPoint && <span className={`filter-hand-cursor artboard-hand-cursor ${pointingHand ? 'drawing' : ''}`} style={{ left: `${artboardCursorPoint.x * 100}%`, top: `${artboardCursorPoint.y * 100}%` }} aria-hidden="true" />}
+          <span ref={artboardCursorRef} className="filter-hand-cursor artboard-hand-cursor" style={{ display: 'none' }} aria-hidden="true" />
           {!hasArtwork && <span className="filter-artboard-hint" aria-hidden="true">DRAW YOUR FILTER</span>}
         </div>
         <div className="filter-editor-footer"><span>PNG · {ART_WIDTH} × {ART_HEIGHT} · TRANSPARENT</span><span>{handTracking?.status === 'error' ? 'HAND TRACKING ERROR' : handTracking?.handVisible ? `${handTracking.gesture?.replaceAll('_', ' ') || 'HAND DETECTED'} · POINT TO DRAW · THUMBS TO CHANGE TOOLS` : 'POINT TO DRAW · THUMBS TO CHANGE TOOLS'}</span><span>{historyRef.current.past.length} ACTION{historyRef.current.past.length === 1 ? '' : 'S'}</span></div>
@@ -710,15 +776,19 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
         <div className={`filter-gesture-camera ${cameraState === 'ready' ? '' : 'unavailable'}`} aria-label="Live gesture drawing preview">
           {cameraState === 'ready' && <video ref={gestureVideoRef} autoPlay muted playsInline className="filter-gesture-video" />}
           <div className="filter-gesture-camera-overlay">
-            {handTracking?.hands?.[0]?.landmarks?.map((landmark, index) => {
-              const point = cameraPoint(landmark);
-              return <i key={index} className={`filter-gesture-landmark ${index === 8 ? 'drawing-tip' : ''}`} style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%` }} />;
-            })}
+            {Array.from({ length: 21 }, (_, index) => (
+              <i
+                key={index}
+                ref={(element) => { landmarkDotsRef.current[index] = element; }}
+                className={`filter-gesture-landmark ${index === 8 ? 'drawing-tip' : ''}`}
+                style={{ display: 'none' }}
+              />
+            ))}
           </div>
-          <span className={`filter-gesture-status ${pointingHand ? 'drawing' : ''}`}>
+          <span className={`filter-gesture-status ${handTracking?.pointingActive ? 'drawing' : ''}`}>
             {cameraState !== 'ready' ? cameraState === 'error' ? 'CAMERA UNAVAILABLE' : 'STARTING CAMERA'
               : handTracking?.status === 'error' ? 'HAND TRACKING ERROR'
-                : pointingHand ? 'POINTING · DRAWING'
+                : handTracking?.pointingActive ? 'POINTING · DRAWING'
                   : handTracking?.handVisible ? `${handTracking.gesture?.replaceAll('_', ' ') || 'HAND DETECTED'} · POINT TO DRAW` : 'SHOW HAND · POINT TO DRAW'}
           </span>
         </div>
@@ -735,7 +805,7 @@ export default function FilterCreator({ cameraState, cameraError, cameraStream, 
           <video ref={previewVideoRef} autoPlay muted playsInline className="filter-preview-video" />
           <canvas ref={previewCanvasRef} className="filter-preview-canvas" aria-label="Custom drawing anchored to the detected face" />
           {!capturedPhoto && <canvas ref={liveDrawCanvasRef} className="filter-live-drawing-canvas" aria-label="Draw directly over the live camera preview" onPointerDown={startLivePointer} onPointerMove={moveLivePointer} onPointerUp={finishLivePointer} onPointerCancel={finishLivePointer} onLostPointerCapture={finishLivePointer} />}
-          {!capturedPhoto && liveCursorPoint && <span className={`filter-hand-cursor live-hand-cursor ${pointingHand ? 'drawing' : ''}`} style={{ left: `${liveCursorPoint.x * 100}%`, top: `${liveCursorPoint.y * 100}%` }} aria-hidden="true" />}
+          <span ref={liveCursorRef} className="filter-hand-cursor live-hand-cursor" style={{ display: 'none' }} aria-hidden="true" />
           {capturedPhoto && <img className="filter-live-captured-photo" src={capturedPhoto} alt="Captured filter drawing photo" />}
           <div className="filter-preview-frame-overlay"><span className="frame-corner tl" /><span className="frame-corner tr" /><span className="frame-corner bl" /><span className="frame-corner br" /><span className="filter-preview-label">{filterName || 'UNTITLED FILTER'} · LOCAL PREVIEW</span></div>
           {!capturedPhoto && cameraState === 'ready' && <div className="filter-live-toolbar" aria-label="Live drawing tool selection">

@@ -37,7 +37,11 @@ export default function App() {
   const gameRef = useRef(game);
   const audioRef = useRef(null);
   const tracking = useHandTracking({ videoRef, enabled: ((screen === 'camera' && inputMode === 'camera') || screen === 'aura-mirror' || screen === 'filter-creator') && cameraState === 'ready' && !!stream && pageVisible });
-  const faceTracking = useFaceTracking({ videoRef, enabled: ['aura-mirror', 'filter-creator'].includes(screen) && cameraState === 'ready' && !!stream && pageVisible });
+  const faceTracking = useFaceTracking({
+    videoRef,
+    enabled: ['aura-mirror', 'filter-creator'].includes(screen) && cameraState === 'ready' && !!stream && pageVisible,
+    readoutIntervalMs: screen === 'aura-mirror' ? 250 : Infinity,
+  });
 
   function commitGame(nextGame) {
     if (nextGame === gameRef.current) return nextGame;

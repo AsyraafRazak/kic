@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
-import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  getFaceLandmarker,
+  invalidateFaceLandmarker,
+  nextVisionTimestamp,
+} from '../tracking/visionManager.js';
 
-const MODEL_URL = '/models/face_landmarker.task';
-const WASM_URL = '/wasm';
 const INFERENCE_INTERVAL_MS = 100;
 const SMOOTHING = 0.38;
 const TRACKING_LOSS_GRACE_MS = 900;
@@ -18,6 +20,7 @@ const EMPTY_FACE = {
   confidence: null,
   confidenceSource: null,
   orientation: null,
+  delegate: null,
   error: '',
 };
 
@@ -79,152 +82,183 @@ function orientationFromMatrix(matrix) {
   };
 }
 
-/** Local, throttled Face Landmarker inference. Positions are mirrored for the preview. */
-export default function useFaceTracking({ videoRef, enabled }) {
+function shouldSyncFaceUi(previous, next, now, lastReadoutAt, intervalMs) {
+  if (
+    previous.status !== next.status ||
+    previous.faceVisible !== next.faceVisible ||
+    previous.facesDetected !== next.facesDetected ||
+    previous.error !== next.error ||
+    previous.delegate !== next.delegate ||
+    Boolean(previous.center) !== Boolean(next.center) ||
+    Boolean(previous.orientation) !== Boolean(next.orientation)
+  ) {
+    return true;
+  }
+  return next.faceVisible && Number.isFinite(intervalMs) && now - lastReadoutAt >= intervalMs;
+}
+
+/**
+ * Local, throttled Face Landmarker inference. Positions are mirrored for the preview.
+ * Exposes `latestRef` for 60 fps canvas consumers while throttling React state updates.
+ */
+export default function useFaceTracking({ videoRef, enabled, readoutIntervalMs = Infinity }) {
   const [faceTracking, setFaceTracking] = useState(EMPTY_FACE);
+  const latestRef = useRef(EMPTY_FACE);
+  const readoutIntervalRef = useRef(readoutIntervalMs);
+  readoutIntervalRef.current = readoutIntervalMs;
 
   useEffect(() => {
     if (!enabled) {
+      latestRef.current = EMPTY_FACE;
       setFaceTracking(EMPTY_FACE);
       return undefined;
     }
 
     let cancelled = false;
     let animationFrame = 0;
-    let landmarker;
+    let activeTask = null;
+    let activeDelegate = null;
+    let retriedCpu = false;
+    let committedUi = EMPTY_FACE;
+    let lastReadoutAt = 0;
     let lastVideoTime = -1;
     let lastInferenceAt = 0;
-    let lastTimestamp = 0;
     let smoothed = [];
     let previouslyVisible = false;
     let lastFaceSeenAt = 0;
 
-    setFaceTracking({ ...EMPTY_FACE, status: 'loading' });
-
-    async function initialize() {
-      try {
-        const video = videoRef.current;
-        if (!video) throw new Error('CAMERA_VIDEO_NOT_READY');
-
-        const [modelResponse, wasmProbe] = await Promise.all([
-          fetch(MODEL_URL),
-          fetch(`${WASM_URL}/vision_wasm_internal.js`, { method: 'HEAD' }),
-        ]);
-        const wasmBinaryProbe = await fetch(`${WASM_URL}/vision_wasm_internal.wasm`, { method: 'HEAD' });
-        const modelType = modelResponse.headers.get('content-type') || '';
-        const modelBuffer = await modelResponse.arrayBuffer();
-        if (!modelResponse.ok || modelType.includes('text/html') || !modelBuffer.byteLength) {
-          throw new Error('FACE_MODEL_MISSING');
-        }
-        if (!wasmProbe.ok || !wasmBinaryProbe.ok) throw new Error('FACE_WASM_MISSING');
-
-        const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-        const task = await FaceLandmarker.createFromOptions(vision, {
-          baseOptions: { modelAssetBuffer: new Uint8Array(modelBuffer), delegate: 'CPU' },
-          runningMode: 'VIDEO',
-          numFaces: 4,
-          minFaceDetectionConfidence: 0.55,
-          minFacePresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-          outputFacialTransformationMatrixes: true,
-        });
-
-        if (cancelled) {
-          task.close();
-          return;
-        }
-        landmarker = task;
-        setFaceTracking({ ...EMPTY_FACE, status: 'searching' });
-
-        const processFrame = (now) => {
-          if (cancelled) return;
-          animationFrame = requestAnimationFrame(processFrame);
-          const currentVideo = videoRef.current;
-          if (!landmarker || !currentVideo || currentVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
-          if (currentVideo.currentTime === lastVideoTime || now - lastInferenceAt < INFERENCE_INTERVAL_MS) return;
-
-          lastVideoTime = currentVideo.currentTime;
-          lastInferenceAt = now;
-          lastTimestamp = Math.max(lastTimestamp + 1, Math.round(now));
-
-          try {
-            const result = landmarker.detectForVideo(currentVideo, lastTimestamp);
-            const detectedFaces = (result.faceLandmarks || []).filter((landmarks) => landmarks?.length);
-            const previousFaces = smoothed;
-            const matchedPrevious = new Set();
-            const faces = detectedFaces.map((sourceLandmarks, index) => {
-              const unsmoothed = smoothLandmarks(sourceLandmarks, null);
-              const rawCenter = estimateBounds(unsmoothed).center;
-              let previousIndex = -1;
-              let nearestDistance = Infinity;
-              previousFaces.forEach((previousLandmarks, candidateIndex) => {
-                if (matchedPrevious.has(candidateIndex)) return;
-                const previousCenter = estimateBounds(previousLandmarks).center;
-                const distance = Math.hypot(rawCenter.x - previousCenter.x, rawCenter.y - previousCenter.y);
-                if (distance < nearestDistance) {
-                  nearestDistance = distance;
-                  previousIndex = candidateIndex;
-                }
-              });
-              if (previousIndex >= 0) matchedPrevious.add(previousIndex);
-              const landmarks = smoothLandmarks(sourceLandmarks, previousFaces[previousIndex]);
-              const { center, size } = estimateBounds(landmarks);
-              const confidence = estimateConfidence(sourceLandmarks);
-              return {
-                landmarks,
-                center,
-                size,
-                confidence: confidence.value,
-                confidenceSource: confidence.source,
-                orientation: orientationFromMatrix(result.facialTransformationMatrixes?.[index]),
-              };
-            }).filter((face) => face.landmarks.length && face.center && face.size);
-            smoothed = faces.map((face) => face.landmarks);
-            if (!faces.length) {
-              smoothed = [];
-              const status = previouslyVisible || (lastFaceSeenAt > 0 && now - lastFaceSeenAt < TRACKING_LOSS_GRACE_MS) ? 'lost' : 'no-face';
-              previouslyVisible = false;
-              setFaceTracking({ ...EMPTY_FACE, status });
-              return;
-            }
-
-            previouslyVisible = true;
-            lastFaceSeenAt = now;
-            const primary = faces[0];
-            setFaceTracking({
-              status: 'tracking',
-              faceVisible: true,
-              facesDetected: faces.length,
-              faces,
-              landmarks: primary.landmarks,
-              center: primary.center,
-              size: primary.size,
-              confidence: primary.confidence,
-              confidenceSource: primary.confidenceSource,
-              orientation: primary.orientation,
-              error: '',
-            });
-          } catch (error) {
-            cancelled = true;
-            cancelAnimationFrame(animationFrame);
-            setFaceTracking({ ...EMPTY_FACE, status: 'error', error: error?.message || 'Face inference stopped unexpectedly.' });
-          }
-        };
-
-        animationFrame = requestAnimationFrame(processFrame);
-      } catch (error) {
-        if (cancelled) return;
-        setFaceTracking({ ...EMPTY_FACE, status: 'error', error: errorMessage(error) });
+    function publish(next, now = performance.now(), force = false) {
+      latestRef.current = next;
+      if (force || shouldSyncFaceUi(committedUi, next, now, lastReadoutAt, readoutIntervalRef.current)) {
+        committedUi = next;
+        lastReadoutAt = now;
+        setFaceTracking(next);
       }
     }
 
-    initialize();
+    publish({ ...EMPTY_FACE, status: 'loading' }, performance.now(), true);
+
+    async function initTask(forceCpu = false) {
+      const video = videoRef.current;
+      if (!video) throw new Error('CAMERA_VIDEO_NOT_READY');
+
+      const { task, delegate } = await getFaceLandmarker({ forceCpu });
+      if (cancelled) return;
+      activeTask = task;
+      activeDelegate = delegate;
+      publish({ ...EMPTY_FACE, status: 'searching', delegate }, performance.now(), true);
+    }
+
+    const processFrame = (now) => {
+      if (cancelled) return;
+      animationFrame = requestAnimationFrame(processFrame);
+      const currentVideo = videoRef.current;
+      if (!activeTask || !currentVideo || currentVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+      if (currentVideo.currentTime === lastVideoTime || now - lastInferenceAt < INFERENCE_INTERVAL_MS) return;
+
+      lastVideoTime = currentVideo.currentTime;
+      lastInferenceAt = now;
+      const timestamp = nextVisionTimestamp('face', now);
+
+      try {
+        const result = activeTask.detectForVideo(currentVideo, timestamp);
+        const detectedFaces = (result.faceLandmarks || []).filter((landmarks) => landmarks?.length);
+        const previousFaces = smoothed;
+        const matchedPrevious = new Set();
+        const faces = detectedFaces.map((sourceLandmarks, index) => {
+          const unsmoothed = smoothLandmarks(sourceLandmarks, null);
+          const rawCenter = estimateBounds(unsmoothed).center;
+          let previousIndex = -1;
+          let nearestDistance = Infinity;
+          previousFaces.forEach((previousLandmarks, candidateIndex) => {
+            if (matchedPrevious.has(candidateIndex)) return;
+            const previousCenter = estimateBounds(previousLandmarks).center;
+            const distance = Math.hypot(rawCenter.x - previousCenter.x, rawCenter.y - previousCenter.y);
+            if (distance < nearestDistance) {
+              nearestDistance = distance;
+              previousIndex = candidateIndex;
+            }
+          });
+          if (previousIndex >= 0) matchedPrevious.add(previousIndex);
+          const landmarks = smoothLandmarks(sourceLandmarks, previousFaces[previousIndex]);
+          const { center, size } = estimateBounds(landmarks);
+          const confidence = estimateConfidence(sourceLandmarks);
+          return {
+            landmarks,
+            center,
+            size,
+            confidence: confidence.value,
+            confidenceSource: confidence.source,
+            orientation: orientationFromMatrix(result.facialTransformationMatrixes?.[index]),
+          };
+        }).filter((face) => face.landmarks.length && face.center && face.size);
+        smoothed = faces.map((face) => face.landmarks);
+        if (!faces.length) {
+          smoothed = [];
+          const status = previouslyVisible || (lastFaceSeenAt > 0 && now - lastFaceSeenAt < TRACKING_LOSS_GRACE_MS) ? 'lost' : 'no-face';
+          previouslyVisible = false;
+          publish({ ...EMPTY_FACE, status, delegate: activeDelegate }, now);
+          return;
+        }
+
+        previouslyVisible = true;
+        lastFaceSeenAt = now;
+        const primary = faces[0];
+        publish({
+          status: 'tracking',
+          faceVisible: true,
+          facesDetected: faces.length,
+          faces,
+          landmarks: primary.landmarks,
+          center: primary.center,
+          size: primary.size,
+          confidence: primary.confidence,
+          confidenceSource: primary.confidenceSource,
+          orientation: primary.orientation,
+          delegate: activeDelegate,
+          error: '',
+        }, now);
+      } catch (error) {
+        if (activeDelegate === 'GPU' && !retriedCpu) {
+          retriedCpu = true;
+          const failedTask = activeTask;
+          activeTask = null;
+          activeDelegate = null;
+          smoothed = [];
+          invalidateFaceLandmarker(failedTask);
+          initTask(true).catch((retryError) => {
+            if (cancelled) return;
+            cancelled = true;
+            cancelAnimationFrame(animationFrame);
+            publish({ ...EMPTY_FACE, status: 'error', error: errorMessage(retryError) }, now, true);
+          });
+          return;
+        }
+        cancelled = true;
+        cancelAnimationFrame(animationFrame);
+        invalidateFaceLandmarker(activeTask);
+        activeTask = null;
+        publish({ ...EMPTY_FACE, status: 'error', error: error?.message || 'Face inference stopped unexpectedly.' }, now, true);
+      }
+    };
+
+    initTask(false)
+      .then(() => {
+        if (!cancelled) {
+          animationFrame = requestAnimationFrame(processFrame);
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        publish({ ...EMPTY_FACE, status: 'error', error: errorMessage(error) }, performance.now(), true);
+      });
+
     return () => {
       cancelled = true;
       cancelAnimationFrame(animationFrame);
-      landmarker?.close();
+      latestRef.current = EMPTY_FACE;
     };
   }, [enabled, videoRef]);
 
-  return faceTracking;
+  return useMemo(() => ({ ...faceTracking, latestRef }), [faceTracking]);
 }

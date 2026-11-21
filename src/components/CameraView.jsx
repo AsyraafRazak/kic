@@ -10,7 +10,7 @@ export default function CameraView({ videoRef, hasCamera, active, demoMode, trac
     if (!active) return undefined;
     return startEffectsCanvas(
       canvasRef.current,
-      () => inputsRef.current.tracking,
+      () => inputsRef.current.tracking?.latestRef?.current || inputsRef.current.tracking,
       () => inputsRef.current.game,
       (elapsedMs) => inputsRef.current.onCharge(elapsedMs),
       () => inputsRef.current.onFirePulse(),
