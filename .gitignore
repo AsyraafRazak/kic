@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Web build output
+dist/
+
+# Electron desktop release artifacts
+windows-desktop/release/
+
+# Android / Gradle build artifacts
+android-tablet/.gradle/
+android-tablet/build/
+android-tablet/app/build/
+android-tablet/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Environment & logs
+.env
+.env.*
+*.log
+npm-debug.log*
+
+# Editor & OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

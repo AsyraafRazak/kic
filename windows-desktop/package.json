@@ -1,0 +1,51 @@
+{
+  "name": "iqra-gesture-lab-windows",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Offline Windows desktop app for IQRA Gesture Lab",
+  "main": "main.cjs",
+  "scripts": {
+    "build:web": "npm --prefix .. run build",
+    "dist": "npm run build:web && electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.kelabiqra.gesturelab",
+    "productName": "IQRA Gesture Lab",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist",
+        "to": "web",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}
