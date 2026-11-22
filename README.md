@@ -89,3 +89,5 @@ npm run preview -- --host 127.0.0.1
 - **Windows Desktop Installer:** See [`windows-desktop/README.md`](windows-desktop/README.md) to build the NSIS `.exe` installer (`windows-desktop/release/` is excluded from Git—distribute compiled `.exe` binaries via **GitHub Releases**).
 - **Android Tablet APK:** See [`android-tablet/README.md`](android-tablet/README.md) to build the offline debug/release APK via `build-apk.bat`.
 - **Engineering Improvements & Roadmap:** See [`IMPROVEMENT.md`](IMPROVEMENT.md).
+
+# test
